@@ -5,31 +5,31 @@ class OmronSensor
 
   Tlatest_sensing_data = [
     ['sequence_number', 1],
-    ['temperature', 0.01],
-    ['relative_humidity', 0.01],
+    ['temperature', 100],
+    ['relative_humidity', 100],
     ['ambient_light', 1],
-    ['barometric_pressure', 0.001],
-    ['sound_noise', 0.01],
+    ['barometric_pressure', 1000],
+    ['sound_noise', 100],
     ['eTVOC', 1],
     ['eCO2', 1]
   ]
 
   Tlatest_calculation_data = [
     ['sequence_number', 1],
-    ['discomfort_index', 0.01],
-    ['heat_stroke', 0.01],
+    ['discomfort_index', 100],
+    ['heat_stroke', 100],
     ['vibration_information', 1],
-    ['SI_value', 0.1],
-    ['PGA', 0.1],
-    ['seismic_intensity', 0.001],
-    ['acceleration_x', 0.1],
-    ['acceleration_y', 0.1],
-    ['acceleration_z', 0.1],
+    ['SI_value', 10],
+    ['PGA', 10],
+    ['seismic_intensity', 1000],
+    ['acceleration_x', 10],
+    ['acceleration_y', 10],
+    ['acceleration_z', 10],
   ]
 
   def data_to_hash(data, template)
     template.zip(data).map do |fmt, v|
-      [fmt[0], v * fmt[1]]
+      [fmt[0], v.fdiv(fmt[1])]
     end.to_h
   end
 
@@ -58,11 +58,13 @@ class OmronSensor
       while line = io.gets
         if /value\: (.*)/ =~ line
           it = [$1.split.join('')].pack("H*").unpack("Cssslsss")
-          queue.push(it)
+          queue.push(data_to_hash(it, Tlatest_sensing_data))
         end
       end
+      puts 'closed'
     rescue
       io.close
+      puts 'rescue'
     end
   end
 end
@@ -71,13 +73,15 @@ if __FILE__ == $0
   require 'pp'
   require 'thread'
   o = OmronSensor.new
+=begin
   v1 = o.latest_sensing_data
   v2 = o.latest_calculation_data
   pp o.data_to_hash(v1, OmronSensor::Tlatest_sensing_data)
   pp o.data_to_hash(v2, OmronSensor::Tlatest_calculation_data)
+=end
   queue = Queue.new
   Thread.new {o.notify_sensing_data(queue)}
   while true
-    pp o.data_to_hash(queue.pop, OmronSensor::Tlatest_sensing_data)
+    pp queue.pop
   end
 end
