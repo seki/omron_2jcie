@@ -28,6 +28,8 @@ module MyBLE
 
       yield(node, properties)
     end
+  ensure
+    Adapter.StopDiscovery
   end
 
   def connect(node, prop)
@@ -84,35 +86,94 @@ module MyBLE
   end
 end
 
-module MyOmron
-  module_function
+class MyOmron
+  def initialize(device)
+    @uuid_to_char = {}
+    @using = [
+      uuid(0x5000),
+      uuid(0x5010),
+      uuid(0x5110),
+      uuid(0x5200)
+    ]
+    prepare_characteristic(device)
+  end
+
   def uuid(short)
     "ab70%04x-0a3a-11e8-ba89-0ed5f89f718b" % short
   end
 
-  def set_uuid_to_path(uuid, path)
-    UUID_to_path[uuid] = path
+  def prepare_characteristic(dev)
+    MyBLE::services(dev) do |service, prop|
+      next unless using_service?(prop['UUID'])
+      MyBLE::chars(service) do |char, prop|
+        @uuid_to_char[prop['UUID']] = char
+      end
+    end
   end
 
-  def uuid_to_path(uuid)
-    UUID_to_path[uuid]
+  def using_service?(uuid)
+    @using.include?(uuid)
   end
-
-  MemoryDataService_UUID = uuid(0x5000)
-  LatestDataService_UUID = uuid(0x5010)
-  TimeSettingSservice_UUID = uuid(0x5200)
-
-  MyService_UUID = [uuid(0x5010), uuid(0x5110)]
-
-  LatestSensingData_UUID = uuid(0x5012)
-  LatestCalculationData_UUID = uuid(0x5013)
-  LEDSettingNormalState_UUID = uuid(0x5111)
-
-  UUID_to_path = {}
 
   def set_LED_normal(ary)
-    char = MyBLE::Bluez.object(uuid_to_path(uuid(0x5111)))
+    char = @uuid_to_char[uuid(0x5111)]
     char.WriteValue(ary, {})
+  end
+
+  def read_latest_sensing
+    char = @uuid_to_char[uuid(0x5012)]
+    char.ReadValue([])[0]
+  end
+
+  def read_memory_index
+    char = @uuid_to_char[uuid(0x5004)]
+    char.ReadValue([])[0].pack('C*').unpack('LL')
+  end
+
+  def read_time_counter
+    @uuid_to_char[uuid(0x5201)].ReadValue([])[0]
+  end
+
+  def read_time_setting
+    @uuid_to_char[uuid(0x5202)].ReadValue([])[0]
+  end
+
+  def write_time_setting
+    char = @uuid_to_char[uuid(0x5202)]
+    char.WriteValue([Time.now.to_i].pack('Q').unpack('C*'), {})
+  end
+
+  def read_memory_stroage_interval
+    @uuid_to_char[uuid(0x5203)].ReadValue([])[0]
+  end
+
+  def write_memory_stroage_interval(sec)
+    char = @uuid_to_char[uuid(0x5203)]
+    char.WriteValue([sec].pack('S').unpack('C*'), {})
+  end
+
+  def request_memory_index(from, to, type)
+    it = [from, to, type].pack('LLC').unpack('C*')
+    char = @uuid_to_char[uuid(0x5005)]
+    char.WriteValue(it, {})
+  end
+
+  def notify_memory_sensing_data(queue)
+    char = @uuid_to_char[uuid(0x500a)]
+    char.StartNotify
+    char.default_iface = MyBLE::PROPERTIES_IF
+    char.on_signal('PropertiesChanged') do |_, v|
+      queue.push(v)
+    end
+  end
+
+  def notify_latest_sensing_data
+    char = @uuid_to_char[uuid(0x5012)]
+    char.StartNotify
+    char.default_iface = MyBLE::PROPERTIES_IF
+    char.on_signal('PropertiesChanged') do |_, v|
+      yield(v)
+    end
   end
 end
 
@@ -128,23 +189,42 @@ else
   dev = MyBLE::connect(found[0], found[1])
 end
 
-MyBLE::services(dev) do |service, prop|
-  # MyOmron::set_uuid_to_path(prop['UUID'], service.path)
-  next unless MyOmron::MyService_UUID.include?(prop['UUID'])
-  MyBLE::chars(service) do |char, prop|
-    MyOmron::set_uuid_to_path(prop['UUID'], char.path)
+omron = MyOmron.new(dev)
+
+# omron.write_time_setting
+
+to, from = omron.read_memory_index
+
+omron.set_LED_normal([0, 0, 0, 0, 0])
+
+pp omron.read_latest_sensing
+sleep 1
+pp omron.read_latest_sensing
+sleep 1
+pp omron.read_latest_sensing
+
+omron.set_LED_normal([5, 0, 0, 0, 0])
+pp omron.read_memory_index
+
+pp omron.read_time_counter
+pp omron.read_time_setting
+pp omron.read_memory_stroage_interval
+
+omron.request_memory_index(from, to, 0)
+queue = Queue.new
+omron.notify_memory_sensing_data(queue)
+
+Thread.new(queue) do |q|
+  while true
+    pp q.pop['Value'].pack('C*').unpack('Lssslsss')
   end
 end
 
-MyOmron::set_LED_normal([0, 0, 0, 0, 0])
+omron.notify_latest_sensing_data {|v| 
+  pp [:latest, v['Value'].pack('C*').unpack('Cssslsss')]
+}
 
-path = MyOmron::uuid_to_path(MyOmron::LatestSensingData_UUID)
-char = MyBLE::Bluez.object(path)
+main = DBus::Main.new
+main << MyBLE::Bus
 
-pp MyBLE::read_value(char)
-sleep 1
-pp MyBLE::read_value(char)
-sleep 1
-pp MyBLE::read_value(char)
-
-MyOmron::set_LED_normal([5, 0, 0, 0, 0])
+main.run
