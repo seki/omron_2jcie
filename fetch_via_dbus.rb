@@ -131,11 +131,13 @@ class MyOmron
   end
 
   def read_time_counter
-    @uuid_to_char[uuid(0x5201)].ReadValue([])[0]
+    it = @uuid_to_char[uuid(0x5201)].ReadValue([])[0]
+    it.pack('C*').unpack('Q').first
   end
 
   def read_time_setting
-    @uuid_to_char[uuid(0x5202)].ReadValue([])[0]
+    it = @uuid_to_char[uuid(0x5202)].ReadValue([])[0]
+    it.pack('C*').unpack('Q').first
   end
 
   def write_time_setting
@@ -158,12 +160,17 @@ class MyOmron
     char.WriteValue(it, {})
   end
 
-  def notify_memory_sensing_data(queue)
+  def read_memory_status
+    it = @uuid_to_char[uuid(0x5006)].ReadValue([])[0]
+    it.pack('C*').unpack('CQS')
+  end
+
+  def notify_memory_sensing_data
     char = @uuid_to_char[uuid(0x500a)]
     char.StartNotify
     char.default_iface = MyBLE::PROPERTIES_IF
     char.on_signal('PropertiesChanged') do |_, v|
-      queue.push(v)
+      yield(v)
     end
   end
 
@@ -176,6 +183,45 @@ class MyOmron
     end
   end
 end
+
+class FetchSensing
+  def initialize(omron, queue)
+    @omron = omron
+    @store = []
+    @omron.notify_memory_sensing_data {|v| on_read(v)}
+    @queue = queue
+    @visited = 0
+  end
+  attr_reader :store
+
+  def on_read(v)
+    data = v['Value'].pack('C*').unpack('Lssslsss')
+    p data[0]
+    @store << data
+    if data[0] >= @latest
+      puts :done
+      @queue.push(@store)
+    end
+    # at = @time_counter + @interval * (data[0] - 1)
+  end
+
+  def do_chunk
+    @latest, @last = @omron.read_memory_index
+    return false if @last == 0 || @latest == 0
+    @omron.request_memory_index(@last, @latest, 0)
+
+    while true
+      memory_status = @omron.read_memory_status
+      break if memory_status[0] != 0
+      sleep 0.5
+    end
+
+    @time_counter = memory_status[1]
+    @interval = memory_status[2]
+  end
+end
+
+if __FILE__ == $0
 
 if dev_name = ARGV.shift
   it = (['dev'] + dev_name.split(':')).join('_')
@@ -191,9 +237,21 @@ end
 
 omron = MyOmron.new(dev)
 
+q = Queue.new
+f = FetchSensing.new(omron, q)
+f.do_chunk
+
+Thread.new(q) do |queue|
+  pp queue.pop
+end
+
+=begin
+# omron.write_memory_stroage_interval(60)
+# exit
+
 # omron.write_time_setting
 
-to, from = omron.read_memory_index
+latest, last = omron.read_memory_index
 
 omron.set_LED_normal([0, 0, 0, 0, 0])
 
@@ -203,16 +261,27 @@ pp omron.read_latest_sensing
 sleep 1
 pp omron.read_latest_sensing
 
-omron.set_LED_normal([5, 0, 0, 0, 0])
+omron.set_LED_normal([7, 0, 0, 0, 0])
 pp omron.read_memory_index
 
-pp omron.read_time_counter
-pp omron.read_time_setting
+pp Time.at(omron.read_time_counter)
+pp Time.at(omron.read_time_setting)
 pp omron.read_memory_stroage_interval
 
-omron.request_memory_index(from, to, 0)
 queue = Queue.new
-omron.notify_memory_sensing_data(queue)
+omron.notify_memory_sensing_data do |v|
+  queue.push(v)
+end
+
+omron.request_memory_index(last, latest, 0)
+while true
+  memory_status = omron.read_memory_status
+  pp [:memory_status, memory_status]
+  break if memory_status[0] != 0
+  sleep 0.5
+end
+pp Time.at(memory_status[1])
+
 
 Thread.new(queue) do |q|
   while true
@@ -224,7 +293,11 @@ omron.notify_latest_sensing_data {|v|
   pp [:latest, v['Value'].pack('C*').unpack('Cssslsss')]
 }
 
+=end
+
 main = DBus::Main.new
 main << MyBLE::Bus
 
 main.run
+
+end
